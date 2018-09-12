@@ -1,8 +1,28 @@
-#[macro_use]
 extern crate diesel;
 extern crate r2d2;
 extern crate r2d2_diesel;
-mod schema;
+#[macro_use]
+extern crate slog;
+extern crate slog_async;
+extern crate slog_term;
+
+use std::error::Error;
+use std::fmt::Display;
+
+#[derive(Debug)]
+pub enum MyError {
+    StringErr(String),
+}
+
+impl Display for MyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match *self {
+            MyError::StringErr(ref err) => write!(formatter, "StringError: {:?}", err),
+        }
+    }
+}
+
+impl Error for MyError {}
 
 type HandleResult<T> = Result<T, ()>;
 
@@ -12,11 +32,30 @@ pub trait WithHandle {
     // withHandle :: Config -> (Handle -> IO a) -> IO a
     fn with_handle<T, F>(config: Self::Config, f: F) -> HandleResult<T>
     where
-        F: FnOnce(Self::Handle) -> HandleResult<T>;
+        F: Fn(&Self::Handle) -> HandleResult<T>;
+}
+
+pub trait WithHandle2<'a> {
+    type Handle;
+    type Handle2;
+    type Config;
+
+    fn with_handle_2<T, F>(
+        config: Self::Config,
+        handle_2: &'a Self::Handle2,
+        f: F,
+    ) -> HandleResult<T>
+    where
+        F: Fn(&Self::Handle) -> HandleResult<T>;
 }
 
 mod logger {
     use super::{HandleResult, WithHandle};
+    use slog::{self, Drain};
+    use slog_async;
+    use slog_term;
+    use std::error::Error;
+    use std::fs::OpenOptions;
     use std::path::Path;
 
     #[derive(Clone)]
@@ -36,7 +75,7 @@ mod logger {
 
     pub struct Handle<'a> {
         config: Config<'a>,
-        logger: Box<FnOnce() -> ()>,
+        logger: slog::Logger,
     }
 
     impl<'a> WithHandle for Handle<'a> {
@@ -45,27 +84,112 @@ mod logger {
 
         fn with_handle<T, F>(config: Self::Config, f: F) -> HandleResult<T>
         where
-            F: FnOnce(Self::Handle) -> HandleResult<T>,
+            F: Fn(&Self::Handle) -> HandleResult<T>,
         {
-            let handle = Handle {
-                config: config,
-                logger: Box::new(|| println!("Logger!")),
+            let drain = if let Some(path) = config.path {
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(path)
+                    .unwrap();
+
+                let decorator = slog_term::PlainDecorator::new(file);
+                let drain = slog_term::FullFormat::new(decorator).build().fuse();
+                let drain = slog_async::Async::new(drain).build().fuse();
+                drain
+            } else {
+                let decorator = slog_term::TermDecorator::new().build();
+                let drain = slog_term::FullFormat::new(decorator).build().fuse();
+                let drain = slog_async::Async::new(drain).build().fuse();
+                drain
             };
-            let handle_before = f(handle);
+
+            let logger = slog::Logger::root(drain, o!());
+            logger.new(o!());
+            let handle = Handle { config, logger };
+            let handle_before = f(&handle);
             handle_before
         }
     }
 
-    /*    pub fn log(handle: Handle) -> Result<(), ()> {*/
-    //println!();
-    /*}*/
+    struct Log<'a> {
+        verbosity: &'a Verbosity,
+        string: Option<&'a str>,
+        error: Option<Box<Error>>,
+    }
 
+    fn log(handle: &Handle, log: Log) -> Result<(), ()> {
+        let Log {
+            verbosity,
+            string,
+            error,
+        } = log;
+
+        match verbosity {
+            Verbosity::Debug => debug!(handle.logger, "{}", string.unwrap_or("")),
+            Verbosity::Info => info!(handle.logger, "{}", string.unwrap_or("")),
+            Verbosity::Warning => warn!(handle.logger, "{}", string.unwrap_or("")),
+            Verbosity::Error => error!(handle.logger, "{}", error.unwrap()),
+        }
+
+        Ok(())
+    }
+
+    pub fn debug(handle: &Handle, string: &str) -> Result<(), ()> {
+        log(
+            handle,
+            Log {
+                verbosity: &Verbosity::Debug,
+                string: Some(string),
+                error: None,
+            },
+        )
+    }
+
+    pub fn info(handle: &Handle, string: &str) -> Result<(), ()> {
+        log(
+            handle,
+            Log {
+                verbosity: &Verbosity::Info,
+                string: Some(string),
+                error: None,
+            },
+        )
+    }
+
+    pub fn warning(handle: &Handle, string: &str) -> Result<(), ()> {
+        log(
+            handle,
+            Log {
+                verbosity: &Verbosity::Warning,
+                string: Some(string),
+                error: None,
+            },
+        )
+    }
+
+    pub fn error<E: 'static>(handle: &Handle, error: E) -> Result<(), ()>
+    where
+        E: Error,
+    {
+        log(
+            handle,
+            Log {
+                verbosity: &Verbosity::Error,
+                string: None,
+                error: Some(Box::new(error)),
+            },
+        )
+    }
 }
 mod database {
-    use super::{HandleResult, WithHandle};
+    use super::logger;
+    use super::{HandleResult, WithHandle2};
     use diesel::pg::PgConnection;
     use r2d2;
     use r2d2_diesel::ConnectionManager;
+    use MyError;
 
     // TODO: Add a new fn instead of using pub.
     #[derive(Clone)]
@@ -73,23 +197,33 @@ mod database {
         pub connection_string: String,
     }
 
-    pub struct Handle {
+    pub struct Handle<'a, 'b: 'a> {
         config: Config,
         pool: Pool,
+        logger_handle: &'a logger::Handle<'b>,
     }
 
-    impl WithHandle for Handle {
+    impl<'a> WithHandle2<'a> for Handle<'a, 'a> {
         type Handle = Self;
+        type Handle2 = logger::Handle<'a>;
         type Config = Config;
 
-        fn with_handle<T, F>(config: Self::Config, f: F) -> HandleResult<T>
+        fn with_handle_2<T, F>(
+            config: Self::Config,
+            handle_2: &'a Self::Handle2,
+            f: F,
+        ) -> HandleResult<T>
         where
-            F: FnOnce(Self::Handle) -> HandleResult<T>,
+            F: Fn(&Self::Handle) -> HandleResult<T>,
         {
             let pool = init_pool(&config.connection_string);
-            let handle = Handle { config, pool };
+            let handle = Handle {
+                config,
+                pool,
+                logger_handle: handle_2,
+            };
 
-            f(handle)
+            f(&handle)
         }
     }
 
@@ -102,34 +236,17 @@ mod database {
             .expect("Failed to create database pool.")
     }
 
-    pub struct DbConnection(pub r2d2::PooledConnection<ConnectionManager<PgConnection>>);
-
-    use schema::users;
-
-    #[derive(QueryableByName)]
-    #[table_name = "users"]
+    #[derive(Debug)]
     pub struct User {
         pub id: String,
         pub name: String,
     }
 
-    pub fn create_user(handle: Handle, user: User) -> Result<Vec<User>, ()> {
-        use diesel::{self, RunQueryDsl};
+    pub fn create_user(handle: &Handle, user: User) -> Result<Vec<User>, MyError> {
+        let s = format!("Failed to create user: {:?}", user);
+        let _created_user = handle.pool.get().map(|_db_conn| vec![user]).unwrap();
 
-        handle
-            .pool
-            .get()
-            .map_err(|_| ())
-            .and_then(|db_conn| {
-                let users: Result<Vec<User>, _> = diesel::sql_query("SELECT * FROM users")
-                    .load(&*db_conn)
-                    .map_err(|err| println!("err {:?}", err));
-                users
-            })
-            .map(|users| {
-                println!("Created users!");
-                users
-            })
+        Err(MyError::StringErr(s))
     }
 }
 
@@ -140,18 +257,19 @@ struct Config<'a> {
 }
 
 struct Handle<'a> {
-    logger_handle: logger::Handle<'a>,
-    database_handle: database::Handle,
+    logger_handle: &'a logger::Handle<'a>,
+    database_handle: &'a database::Handle<'a, 'a>,
 }
 
+// TODO: Should have a trait
 fn with_handle<T, F>(
     _config: Config,
-    logger: logger::Handle,
-    database: database::Handle,
+    logger: &logger::Handle,
+    database: &database::Handle,
     f: F,
 ) -> HandleResult<T>
 where
-    F: FnOnce(Handle) -> HandleResult<T>,
+    F: Fn(Handle) -> HandleResult<T>,
 {
     f(Handle {
         logger_handle: logger,
@@ -167,7 +285,20 @@ fn run(handle: Handle) -> Result<(), ()> {
         name: "Sherlock".to_owned(),
     };
 
-    let created_user = create_user(handle.database_handle, user);
+    let _created_user = create_user(handle.database_handle, user)
+        .map_err(|err| {
+            let _ = logger::error(handle.logger_handle, err);
+        })
+        .map(|created_user| {
+            let _ = logger::info(
+                handle.logger_handle,
+                &format!("Created users {:?}", created_user),
+            );
+            created_user
+        });
+
+    let _ = logger::debug(handle.logger_handle, "Running...");
+    let _ = logger::warning(handle.logger_handle, "Warning!");
 
     Ok(())
 }
@@ -189,9 +320,11 @@ fn main() -> Result<(), ()> {
         database_config,
     } = config;
 
-    logger::Handle::with_handle(logger_config, |log| {
-        database::Handle::with_handle(database_config, |db| {
-            with_handle(cloned_config, log, db, |app_handle| run(app_handle))
+    logger::Handle::with_handle(logger_config, |log_handle| {
+        database::Handle::with_handle_2(database_config.clone(), log_handle, |db_handle| {
+            with_handle(cloned_config.clone(), log_handle, db_handle, |app_handle| {
+                run(app_handle)
+            })
         })
     })
 }

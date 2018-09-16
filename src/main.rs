@@ -74,7 +74,7 @@ mod logger {
     use std::fs::OpenOptions;
     use std::path::Path;
 
-    #[derive(Clone)]
+    #[derive(Clone, PartialEq, PartialOrd)]
     pub enum Verbosity {
         Debug,
         Info,
@@ -122,10 +122,10 @@ mod logger {
             };
 
             let logger = slog::Logger::root(drain, o!());
-            logger.new(o!());
+            let logger = logger.new(o!());
+
             let handle = Handle { config, logger };
-            let handle_before = f(&handle);
-            handle_before
+            f(&handle)
         }
     }
 
@@ -142,10 +142,21 @@ mod logger {
             error,
         } = log;
 
+        let has_enough_verbosity = *verbosity >= handle.config.verbosity;
+
         match verbosity {
-            Verbosity::Debug => debug!(handle.logger, "{}", string.unwrap_or("")),
-            Verbosity::Info => info!(handle.logger, "{}", string.unwrap_or("")),
-            Verbosity::Warning => warn!(handle.logger, "{}", string.unwrap_or("")),
+            Verbosity::Debug if has_enough_verbosity => {
+                debug!(handle.logger, "{}", string.unwrap_or(""))
+            }
+            Verbosity::Debug => {}
+            Verbosity::Info if has_enough_verbosity => {
+                info!(handle.logger, "{}", string.unwrap_or(""))
+            }
+            Verbosity::Info => {}
+            Verbosity::Warning if has_enough_verbosity => {
+                warn!(handle.logger, "{}", string.unwrap_or(""))
+            }
+            Verbosity::Warning => {}
             Verbosity::Error => error!(handle.logger, "{}", error.unwrap()),
         }
 
@@ -207,14 +218,19 @@ mod database {
     use r2d2_diesel::ConnectionManager;
     use MyError;
 
-    // TODO: Add a new fn instead of using pub.
     #[derive(Clone)]
-    pub struct Config {
-        pub connection_string: String,
+    pub struct Config<'a> {
+        connection_string: &'a str,
+    }
+
+    impl<'a> Config<'a> {
+        pub fn new(connection_string: &'a str) -> Self {
+            Config { connection_string }
+        }
     }
 
     pub struct Handle<'a, 'b: 'a> {
-        config: &'a Config,
+        config: &'a Config<'a>,
         pool: Pool,
         logger_handle: &'a logger::Handle<'b, 'b>,
     }
@@ -222,11 +238,11 @@ mod database {
     impl<'a> WithHandle2<'a> for Handle<'a, 'a> {
         type Handle = Self;
         type Handle2 = logger::Handle<'a, 'a>;
-        type Config = Config;
+        type Config = Config<'a>;
 
         fn with_handle2<T, F>(
             config: &'a Self::Config,
-            handle_2: &'a Self::Handle2,
+            handle2: &'a Self::Handle2,
             f: F,
         ) -> HandleResult<T>
         where
@@ -236,7 +252,7 @@ mod database {
             let handle = Handle {
                 config,
                 pool,
-                logger_handle: handle_2,
+                logger_handle: handle2,
             };
 
             f(&handle)
@@ -260,6 +276,9 @@ mod database {
 
     pub fn create_user(handle: &Handle, user: User) -> Result<Vec<User>, MyError> {
         let s = format!("Failed to create user: {:?}", user);
+
+        let _ = logger::info(handle.logger_handle, &format!("Creating user: {:?}", user));
+
         let _created_user = handle.pool.get().map(|_db_conn| vec![user]).unwrap();
 
         Err(MyError::StringErr(s))
@@ -269,7 +288,7 @@ mod database {
 #[derive(Clone)]
 struct Config<'a> {
     logger_config: logger::Config<'a>,
-    database_config: database::Config,
+    database_config: database::Config<'a>,
 }
 
 struct Handle<'a> {
@@ -329,12 +348,11 @@ fn run(handle: &Handle) -> Result<(), ()> {
 fn main() -> Result<(), ()> {
     let config = Config {
         logger_config: logger::Config {
-            verbosity: logger::Verbosity::Debug,
-            path: Some(std::path::Path::new("./logs/x.log")),
+            verbosity: logger::Verbosity::Info,
+            path: None
+            //path: Some(std::path::Path::new("./logs/x.log")),
         },
-        database_config: database::Config {
-            connection_string: "postgres://postgres:password@localhost/postgres".to_owned(),
-        },
+        database_config: database::Config::new("postgres://postgres:password@localhost/postgres"),
     };
 
     logger::Handle::with_handle(&config.logger_config, |log_handle| {

@@ -40,7 +40,7 @@ pub trait WithHandle2<'a> {
     type Handle2;
     type Config;
 
-    fn with_handle_2<T, F>(
+    fn with_handle2<T, F>(
         config: &'a Self::Config,
         handle_2: &'a Self::Handle2,
         f: F,
@@ -208,7 +208,7 @@ mod database {
         type Handle2 = logger::Handle<'a, 'a>;
         type Config = Config;
 
-        fn with_handle_2<T, F>(
+        fn with_handle2<T, F>(
             config: &'a Self::Config,
             handle_2: &'a Self::Handle2,
             f: F,
@@ -315,7 +315,7 @@ fn main() -> Result<(), ()> {
     };
 
     logger::Handle::with_handle(&config.logger_config, |log_handle| {
-        database::Handle::with_handle_2(&config.database_config, log_handle, |db_handle| {
+        database::Handle::with_handle2(&config.database_config, log_handle, |db_handle| {
             with_handle(&config, log_handle, db_handle, |app_handle| run(app_handle))
         })
     })

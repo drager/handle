@@ -49,6 +49,22 @@ pub trait WithHandle2<'a> {
         F: FnOnce(&Self::Handle) -> HandleResult<T>;
 }
 
+pub trait WithHandle3<'a> {
+    type Handle;
+    type Handle2;
+    type Handle3;
+    type Config;
+
+    fn with_handle3<T, F>(
+        config: &'a Self::Config,
+        handle2: &'a Self::Handle2,
+        handle3: &'a Self::Handle3,
+        f: F,
+    ) -> HandleResult<T>
+    where
+        F: FnOnce(&Self::Handle) -> HandleResult<T>;
+}
+
 mod logger {
     use super::{HandleResult, WithHandle};
     use slog::{self, Drain};
@@ -262,22 +278,29 @@ struct Handle<'a> {
 }
 
 // TODO: Should have a trait: WithHandle3, WithHandle4, WithHandle5.
-fn with_handle<T, F>(
-    _config: &Config,
-    logger: &logger::Handle,
-    database: &database::Handle,
-    f: F,
-) -> HandleResult<T>
-where
-    F: FnOnce(Handle) -> HandleResult<T>,
-{
-    f(Handle {
-        logger_handle: logger,
-        database_handle: database,
-    })
+impl<'a> WithHandle3<'a> for Handle<'a> {
+    type Config = Config<'a>;
+    type Handle = Handle<'a>;
+    type Handle2 = logger::Handle<'a, 'a>;
+    type Handle3 = database::Handle<'a, 'a>;
+
+    fn with_handle3<T, F>(
+        _config: &'a Self::Config,
+        logger: &'a Self::Handle2,
+        database: &'a Self::Handle3,
+        f: F,
+    ) -> HandleResult<T>
+    where
+        F: FnOnce(&Self::Handle) -> HandleResult<T>,
+    {
+        f(&Handle {
+            logger_handle: logger,
+            database_handle: database,
+        })
+    }
 }
 
-fn run(handle: Handle) -> Result<(), ()> {
+fn run(handle: &Handle) -> Result<(), ()> {
     use database::{create_user, User};
 
     let user = User {
@@ -316,7 +339,7 @@ fn main() -> Result<(), ()> {
 
     logger::Handle::with_handle(&config.logger_config, |log_handle| {
         database::Handle::with_handle2(&config.database_config, log_handle, |db_handle| {
-            with_handle(&config, log_handle, db_handle, |app_handle| run(app_handle))
+            Handle::with_handle3(&config, log_handle, db_handle, |app_handle| run(app_handle))
         })
     })
 }

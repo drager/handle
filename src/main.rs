@@ -26,13 +26,13 @@ impl Error for MyError {}
 
 type HandleResult<T> = Result<T, ()>;
 
-pub trait WithHandle {
+pub trait WithHandle<'a> {
     type Handle;
     type Config;
     // withHandle :: Config -> (Handle -> IO a) -> IO a
-    fn with_handle<T, F>(config: Self::Config, f: F) -> HandleResult<T>
+    fn with_handle<T, F>(config: &'a Self::Config, f: F) -> HandleResult<T>
     where
-        F: Fn(&Self::Handle) -> HandleResult<T>;
+        F: FnOnce(&Self::Handle) -> HandleResult<T>;
 }
 
 pub trait WithHandle2<'a> {
@@ -41,12 +41,12 @@ pub trait WithHandle2<'a> {
     type Config;
 
     fn with_handle_2<T, F>(
-        config: Self::Config,
+        config: &'a Self::Config,
         handle_2: &'a Self::Handle2,
         f: F,
     ) -> HandleResult<T>
     where
-        F: Fn(&Self::Handle) -> HandleResult<T>;
+        F: FnOnce(&Self::Handle) -> HandleResult<T>;
 }
 
 mod logger {
@@ -73,18 +73,18 @@ mod logger {
         pub verbosity: Verbosity,
     }
 
-    pub struct Handle<'a> {
-        config: Config<'a>,
+    pub struct Handle<'a, 'b: 'a> {
+        config: &'a Config<'b>,
         logger: slog::Logger,
     }
 
-    impl<'a> WithHandle for Handle<'a> {
+    impl<'a> WithHandle<'a> for Handle<'a, 'a> {
         type Handle = Self;
         type Config = Config<'a>;
 
-        fn with_handle<T, F>(config: Self::Config, f: F) -> HandleResult<T>
+        fn with_handle<T, F>(config: &'a Self::Config, f: F) -> HandleResult<T>
         where
-            F: Fn(&Self::Handle) -> HandleResult<T>,
+            F: FnOnce(&Self::Handle) -> HandleResult<T>,
         {
             let drain = if let Some(path) = config.path {
                 let file = OpenOptions::new()
@@ -198,23 +198,23 @@ mod database {
     }
 
     pub struct Handle<'a, 'b: 'a> {
-        config: Config,
+        config: &'a Config,
         pool: Pool,
-        logger_handle: &'a logger::Handle<'b>,
+        logger_handle: &'a logger::Handle<'b, 'b>,
     }
 
     impl<'a> WithHandle2<'a> for Handle<'a, 'a> {
         type Handle = Self;
-        type Handle2 = logger::Handle<'a>;
+        type Handle2 = logger::Handle<'a, 'a>;
         type Config = Config;
 
         fn with_handle_2<T, F>(
-            config: Self::Config,
+            config: &'a Self::Config,
             handle_2: &'a Self::Handle2,
             f: F,
         ) -> HandleResult<T>
         where
-            F: Fn(&Self::Handle) -> HandleResult<T>,
+            F: FnOnce(&Self::Handle) -> HandleResult<T>,
         {
             let pool = init_pool(&config.connection_string);
             let handle = Handle {
@@ -257,19 +257,19 @@ struct Config<'a> {
 }
 
 struct Handle<'a> {
-    logger_handle: &'a logger::Handle<'a>,
+    logger_handle: &'a logger::Handle<'a, 'a>,
     database_handle: &'a database::Handle<'a, 'a>,
 }
 
-// TODO: Should have a trait
+// TODO: Should have a trait: WithHandle3, WithHandle4, WithHandle5.
 fn with_handle<T, F>(
-    _config: Config,
+    _config: &Config,
     logger: &logger::Handle,
     database: &database::Handle,
     f: F,
 ) -> HandleResult<T>
 where
-    F: Fn(Handle) -> HandleResult<T>,
+    F: FnOnce(Handle) -> HandleResult<T>,
 {
     f(Handle {
         logger_handle: logger,
@@ -307,24 +307,16 @@ fn main() -> Result<(), ()> {
     let config = Config {
         logger_config: logger::Config {
             verbosity: logger::Verbosity::Debug,
-            path: None,
+            path: Some(std::path::Path::new("./logs/x.log")),
         },
         database_config: database::Config {
             connection_string: "postgres://postgres:password@localhost/postgres".to_owned(),
         },
     };
 
-    let cloned_config = config.clone();
-    let Config {
-        logger_config,
-        database_config,
-    } = config;
-
-    logger::Handle::with_handle(logger_config, |log_handle| {
-        database::Handle::with_handle_2(database_config.clone(), log_handle, |db_handle| {
-            with_handle(cloned_config.clone(), log_handle, db_handle, |app_handle| {
-                run(app_handle)
-            })
+    logger::Handle::with_handle(&config.logger_config, |log_handle| {
+        database::Handle::with_handle_2(&config.database_config, log_handle, |db_handle| {
+            with_handle(&config, log_handle, db_handle, |app_handle| run(app_handle))
         })
     })
 }

@@ -92,7 +92,6 @@ mod logger {
     #[derive(Clone)]
     pub struct Config<'a> {
         // TODO: Add a new fn instead of using pub.
-        pub path: Option<&'a Path>,
         pub verbosity: Verbosity,
         pub loggers: Vec<&'a LoggerType<'a>>,
     }
@@ -110,9 +109,7 @@ mod logger {
         where
             F: FnOnce(&Self::Handle) -> HandleResult<T>,
         {
-            let Config {
-                path: _, loggers, ..
-            } = config;
+            let Config { loggers, .. } = config;
 
             let drains = if let Some((head, tail)) = loggers.split_first() {
                 let root_drain = match head {
@@ -398,7 +395,6 @@ fn main() -> Result<(), ()> {
     let config = Config {
         logger_config: logger::Config {
             verbosity: logger::Verbosity::Info,
-            path: None,
             loggers: vec![&file_logger, &logger::LoggerType::Term],
         },
         database_config: database::Config::new("postgres://postgres:password@localhost/postgres"),

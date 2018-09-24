@@ -379,7 +379,6 @@ struct Handle<'a> {
     database_handle: &'a database::Handle<'a, 'a>,
 }
 
-// TODO: Should have a trait: WithHandle3, WithHandle4, WithHandle5.
 impl<'a> WithHandle3<'a> for Handle<'a> {
     type Config = Config<'a>;
     type Handle = Handle<'a>;

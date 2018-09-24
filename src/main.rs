@@ -73,6 +73,7 @@ mod logger {
     use std::error::Error;
     use std::fs::OpenOptions;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, PartialEq, PartialOrd)]
     pub enum Verbosity {
@@ -82,11 +83,18 @@ mod logger {
         Error,
     }
 
+    pub enum LoggerType<'a> {
+        File(&'a Path),
+        Term,
+        Sentry(&'a str),
+    }
+
     #[derive(Clone)]
     pub struct Config<'a> {
         // TODO: Add a new fn instead of using pub.
         pub path: Option<&'a Path>,
         pub verbosity: Verbosity,
+        pub loggers: Vec<&'a LoggerType<'a>>,
     }
 
     pub struct Handle<'a, 'b: 'a> {
@@ -102,31 +110,73 @@ mod logger {
         where
             F: FnOnce(&Self::Handle) -> HandleResult<T>,
         {
-            let drain = if let Some(path) = config.path {
-                let file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(path)
-                    .unwrap();
+            let Config {
+                path: _, loggers, ..
+            } = config;
 
-                let decorator = slog_term::PlainDecorator::new(file);
-                let drain = slog_term::FullFormat::new(decorator).build().fuse();
-                let drain = slog_async::Async::new(drain).build().fuse();
-                drain
+            let drains = if let Some((head, tail)) = loggers.split_first() {
+                let root_drain = match head {
+                    LoggerType::File(path) => Some(init_file_logger(path)),
+                    LoggerType::Term => Some(init_term_logger()),
+                    LoggerType::Sentry(_) => None,
+                };
+
+                let fuses = tail
+                    .iter()
+                    .map(|logger_type| match logger_type {
+                        LoggerType::File(path) => Some(init_file_logger(path)),
+                        LoggerType::Term => Some(init_term_logger()),
+                        LoggerType::Sentry(_) => None,
+                    })
+                    .filter_map(|fuse_option| fuse_option)
+                    .collect::<Vec<slog::Fuse<slog_async::Async>>>();
+
+                let root_drain = root_drain.unwrap();
+
+                fuses.into_iter().fold(
+                    Box::new(root_drain) as Box<dyn Drain<Err = _, Ok = _> + Send + Sync>,
+                    |prev, curr| {
+                        Box::new(slog::Duplicate::new(prev, curr).fuse())
+                            as Box<dyn Drain<Err = _, Ok = _> + Send + Sync>
+                    },
+                )
             } else {
-                let decorator = slog_term::TermDecorator::new().build();
-                let drain = slog_term::FullFormat::new(decorator).build().fuse();
-                let drain = slog_async::Async::new(drain).build().fuse();
-                drain
+                Box::new(slog::Discard)
             };
 
-            let logger = slog::Logger::root(drain, o!());
-            let logger = logger.new(o!());
+            let logger_root = slog::Logger::root(
+                Arc::new(
+                    Mutex::new(drains)
+                        .map_err::<_, slog::Never>(|_| panic!("A logging error occurred")),
+                ),
+                o!(),
+            );
 
-            let handle = Handle { config, logger };
+            let handle = Handle {
+                config,
+                logger: logger_root,
+            };
             f(&handle)
         }
+    }
+
+    fn init_term_logger() -> slog::Fuse<slog_async::Async> {
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        slog_async::Async::new(drain).build().fuse()
+    }
+
+    fn init_file_logger(path: &Path) -> slog::Fuse<slog_async::Async> {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+
+        let decorator = slog_term::PlainDecorator::new(file);
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        slog_async::Async::new(drain).build().fuse()
     }
 
     struct Log<'a> {
@@ -230,7 +280,6 @@ mod database {
     }
 
     pub struct Handle<'a, 'b: 'a> {
-        config: &'a Config<'a>,
         pool: Pool,
         logger_handle: &'a logger::Handle<'b, 'b>,
     }
@@ -250,7 +299,6 @@ mod database {
         {
             let pool = init_pool(&config.connection_string);
             let handle = Handle {
-                config,
                 pool,
                 logger_handle: handle2,
             };
@@ -346,11 +394,12 @@ fn run(handle: &Handle) -> Result<(), ()> {
 }
 
 fn main() -> Result<(), ()> {
+    let file_logger = logger::LoggerType::File(std::path::Path::new("./logs/x.log"));
     let config = Config {
         logger_config: logger::Config {
             verbosity: logger::Verbosity::Info,
-            path: None
-            //path: Some(std::path::Path::new("./logs/x.log")),
+            path: None,
+            loggers: vec![&file_logger, &logger::LoggerType::Term],
         },
         database_config: database::Config::new("postgres://postgres:password@localhost/postgres"),
     };

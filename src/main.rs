@@ -65,6 +65,44 @@ pub trait WithHandle3<'a> {
         F: FnOnce(&Self::Handle) -> HandleResult<T>;
 }
 
+pub trait WithHandle4<'a> {
+    type Handle;
+    type Handle2;
+    type Handle3;
+    type Handle4;
+    type Config;
+
+    fn with_handle4<T, F>(
+        config: &'a Self::Config,
+        handle2: &'a Self::Handle2,
+        handle3: &'a Self::Handle3,
+        handle4: &'a Self::Handle4,
+        f: F,
+    ) -> HandleResult<T>
+    where
+        F: FnOnce(&Self::Handle) -> HandleResult<T>;
+}
+
+pub trait WithHandle5<'a> {
+    type Handle;
+    type Handle2;
+    type Handle3;
+    type Handle4;
+    type Handle5;
+    type Config;
+
+    fn with_handle5<T, F>(
+        config: &'a Self::Config,
+        handle2: &'a Self::Handle2,
+        handle3: &'a Self::Handle3,
+        handle4: &'a Self::Handle4,
+        handle5: &'a Self::Handle5,
+        f: F,
+    ) -> HandleResult<T>
+    where
+        F: FnOnce(&Self::Handle) -> HandleResult<T>;
+}
+
 mod logger {
     use super::{HandleResult, WithHandle};
     use slog::{self, Drain};
